@@ -1,28 +1,24 @@
 import web
 from web import form
-import MT19937
-import base64, datetime, hashlib, os
+import crypto, hashlib, os
 
-# token timeout, in minutes
-TIMEOUT = 5		
+STR_COOKIE_NAME = "auth_token"
+
+master_key = os.urandom(16)
+
+#Database of users. Key is username, value is [SHA1(password), userid, role]
+user_db = {"admin":["119ba0f0a97158cd4c92f9ee6cf2f29e75f5e05a", 0, "admin"]}
+user_ids = int(1)
 
 render = web.template.render('templates/')
-urls = ('/', 'index',
-        '/forgot', 'forgot',
-        '/register', 'register',
-        '/reset', 'reset')
-
-#Faking a user database.
-user_dic = {"admin":"119ba0f0a97158cd4c92f9ee6cf2f29e75f5e05a"}
-token_dic = {}
-
-#Seed my super-secure PRNG using the OS
-seed = os.urandom(4) #int(os.urandom(4).encode("hex"), 16)
-MT = MT19937.MT19937(seed)
+urls = ('/', 'index', 
+		'/register', 'register',
+		'/logout', 'logout',
+		'/home', 'home')
 
 class index:
-	myform = form.Form(
-		form.Textbox("username",
+	login_form = form.Form(
+		form.Textbox("user",
 			form.notnull,
 			description="Username",
 			id='usernameBox'),
@@ -33,68 +29,30 @@ class index:
 		form.Button("Login",
 			id='loginButton'))
 
-	def GET(self):
-		form = self.myform()
-		return render.login(form, "")
-   
-	def POST(self):
-		form = self.myform()
-
-		if not form.validates():
-			return render.login(form,"")
-
-		user = form.d.username
-		pw = hashlib.sha1(form.d.password.encode("UTF-8")).hexdigest()
-
-		if user == "admin" and user_dic["admin"] == pw:
-			return render.loggedin(user, True)
-		elif user in user_dic and user_dic[user] == pw:
-			return render.loggedin(user, False)
-		else:
-			return render.login(form,"Username/Password Incorrect")
-
-class forgot:
-	myform = form.Form(
-		form.Textbox("user",
-			form.notnull,
-			description = "Username",
-			id='forgotUser'),
-		form.Button("Reset",
-			description="Send"),
-			id='forgotButton')
-
 	nullform = form.Form()
 
 	def GET(self):
-		form = self.myform()
-		return render.generic(form, "Enter your username to reset your password. A password reset token will be mailed to you.","")
+		user, uid, role = verify_cookie()
+		if user != "":
+			return render.login(self.nullform, user, "Already logged in.")
+
+		return render.login(self.login_form(), "", "")
 
 	def POST(self):
-		form = self.myform()
-		msg = "Enter your username to reset your password. A password reset token will be mailed to you."
-		err = ""
+		form = self.login_form()
 
 		if not form.validates():
-			err = "Invalid form data"
-			return render.generic(form, msg, err)
+			return render.login(form, "", "Invalid form data.")
 
 		user = form.d.user
-         
-		if user in user_dic:
-			token = generate_token()
-			time = datetime.datetime.now() + datetime.timedelta(minutes=TIMEOUT)
-			token_dic[token] = reset_token(user, time)
+		pw = hashlib.sha1(form.d.password.encode("UTF-8")).hexdigest()
 
-			if user == "admin":
-				msg = "Admin emailed reset token."
-			else:
-				#TODO: Email server not working, so I'll just post them to the screen for now.
-				msg = web.ctx.env.get('HTTP_HOST') + "/reset?token=" + token.decode('utf-8')
-				return render.generic(form, msg, err)
-		else:
-			err = "User not found."
+		if user in user_db and user_db[user][0] == pw:
+			create_cookie(user, user_db[user][1], user_db[user][2])
+			raise web.seeother('/home')
+		
+		return render.login(form, "", "Username/Password Incorrect")
 
-		return render.generic(form, msg, err)
 
 class register:
 	myform = form.Form(
@@ -106,107 +64,75 @@ class register:
 			description = "Password"),
 		form.Button("Register",
 			description="Register"))
-			
+
 	nullform = form.Form()
-   
+
 	def GET(self):
-		form = self.myform()
-		return render.generic(form, "Enter a username and password.", "")
+		user, uid, role = verify_cookie()
+		if user != "":
+			return render.generic(self.nullform, user, "", "Already logged in.")
+
+		return render.generic(self.myform(), "", "Enter a username and password.", "")
+		
 
 	def POST(self):
+		global user_ids
 		form = self.myform()
 		msg = ""
 		err = ""
-
+		
 		if not form.validates():
 			err = "Invalid fields."
+		#Prevent those h4x0rs from trying to create user names
+		#that might elevate their privellages.
+		elif "=" in form.d.user or "&" in form.d.user or ";" in form.d.user:
+			err = "Invalid characters in username."
 		else:
-			if form.d.user in user_dic:
+			if form.d.user in user_db:
 				err = "User already registered."
 			else:
-				user_dic[form.d.user] = hashlib.sha1(form.d.password.encode("UTF-8")).hexdigest();
+				#Set the password and role: only non-admin "users" can be created
+				#through the web interface
+				user_db[form.d.user] = [hashlib.sha1(form.d.password.encode("UTF-8")).hexdigest(), user_ids, "user"]
+				user_ids += 1
 				msg = "User registered."
-		return render.generic(self.nullform(), msg, err)
+		return render.generic(self.nullform(), "", msg, err)
 
-class reset:
-	myform = form.Form(
-		form.Password("password",
-			form.notnull,
-			description = "New Password"),
-		form.Hidden("token", 
-			form.notnull,
-			value="", 
-			description="Reset Token"),
-		form.Button("Reset Password",
-			description="Register"))
+class logout:
+	def GET(self):
+		destroy_cookie()
+		raise web.seeother('/')
 
-	nullform = form.Form()
+class home:
 
 	def GET(self):
-		user_data = web.input(token="")
-		token = user_data.token.encode('utf-8')
+		user, uid, role = verify_cookie()
 
-		myform = form.Form(
-			form.Password("password",
-				form.notnull,
-				description = "New Password"),
-			form.Hidden("token", 
-				form.notnull, 
-				value=token, 
-				description="Reset Token"),
-			form.Button("Reset Password",
-			description="Register"))
-		msg = ""
-		err = ""
-
-		if token not in token_dic:
-			err = "Invalid token."
-			return render.generic(self.nullform(), msg, err)
-
-		if token_dic[token].timeout <= datetime.datetime.now():
-			err = "Token expired."
-			return render.generic(self.nullform(), msg, err)
-
-		msg = "Reset Password for: " + token_dic[token].user
-		return render.generic(myform, msg, err)
-
-	def POST(self):
-		form = self.myform()
-		msg = ""
-		err = ""
-
-		if not form.validates():
-			err = "Invalid form data."
-			return render.generic(self.nullform, msg, err)
-
-		token = form.d.token.encode('utf-8')
-
-		#Make sure it's a valid token, and remove it once used
-		if token in token_dic and token_dic[token].timeout > datetime.datetime.now():
-			msg = "Password reset for user: " + token_dic[token].user
-			user = token_dic[token].user
-			user_dic[user] = hashlib.sha1(form.d.password.encode("UTF-8")).hexdigest();
-			del token_dic[token]
+		if user == "":
+			return render.home("", "", "", "Please log in.")
+		elif role == "admin":
+			msg = "Welcome, Admin!"
 		else:
-			err = "Invalid token."
+			msg = "Welcome, " + user
 
-		return render.generic(self.nullform, msg, err)
-   
-class reset_token:
-	def __init__(self, user, timeout):
-		self.user = user
-		self.timeout = timeout
+		return render.home(user, role, msg, "")
 
-def generate_token():
+def destroy_cookie():
+	web.setcookie(STR_COOKIE_NAME, "", expires=-1)
 	
-	#Generate a 256-bit random number as our reset tokwn
-	#by concatentating 8, 32-bit integers with colons
-	token = str(MT.extract_number())
-	for i in range(7):
-		token += ":" + str(MT.extract_number())
-	return base64.b64encode(token.encode('utf-8'))
+def create_cookie(user, uid, role):
+	cookie = crypto.create_crypto_cookie(user, uid, role, master_key)
+	web.setcookie(STR_COOKIE_NAME, cookie.hex())
 
+def verify_cookie():
+    cookie = web.cookies().get(STR_COOKIE_NAME)
+    if cookie == None:
+        return "","",""
+    try:
+        return crypto.verify_crypto_cookie(bytes.fromhex(cookie), master_key)
+    except:
+        return "","",""
 
 if __name__ == "__main__":
 	app = web.application(urls, globals())
-	app.run()   
+	app.run()
