@@ -28,11 +28,10 @@ def cbc_decrypt(ciphertext, key, iv):
         xor_block = bytes([b ^ iv[j % len(iv)] for j, b in enumerate(deciphered_block)])  # XOR the decrypted block with the IV
         plaintext += xor_block  # Append the XORed block to the plaintext
         iv = block  # Update the IV with the current block
-    try:
-        plaintext = pkcs7.pkcs7_unpad(plaintext, AES.block_size)  # Unpad the plaintext using PKCS7 padding
-    except ValueError:
-        raise ValueError("Invalid padding")  # Raise an error if the padding is invalid
-    return plaintext.decode()  # Return the plaintext as a string
+    
+    plaintext = pkcs7.pkcs7_unpad(plaintext, AES.block_size)  # Unpad the plaintext using PKCS7 padding
+    
+    return plaintext[len(iv):].decode()  # Return the plaintext as a string
 
 
 def main():
