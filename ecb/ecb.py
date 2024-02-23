@@ -1,8 +1,10 @@
 from Crypto.Cipher import AES
-from base64 import b64decode, b64encode
+from base64 import b64decode
+from util import hex_to_bytes, bytes_to_hex
 import pkcs7
 from PIL import Image
 from io import BytesIO
+import requests
 
 
 def ecb_encrypt(key, plaintext):
@@ -33,31 +35,92 @@ def test_ecb_mode():
 
 
 def detect_ecb_mode(filename):
+    # Read the ciphertexts from the file
     with open(filename, "r") as f:
         ciphertexts = [bytes.fromhex(line.strip()) for line in f]
+    
     block_size = AES.block_size 
+    
     ecb_ciphertexts = []
     for i, ciphertext in enumerate(ciphertexts):
+        # Divide the ciphertext into blocks of size equal to the block size
         blocks = [ciphertext[j:j+block_size] for j in range(54, len(ciphertext), block_size)]
+        
+        # Check if there are any duplicate blocks
         if len(blocks) != len(set(blocks)):
+            # If duplicate blocks are found, add the index and ciphertext to the list
             ecb_ciphertexts.append((i, ciphertext))
+    
     return ecb_ciphertexts
+    
+
+def register_user(username: str, password: str) -> None:
+    """
+    Registers a user with the server
+    """
+    url = "http://localhost:8080/register"
+    data = {"user": username, "password": password}
+    with requests.Session() as session:
+        response = session.post(url, data=data)
+        return session.cookies.get("auth_token")
+  
+  
+def login_user(username: str, password: str) -> str:
+    """
+    Logs in a user with the server and returns the cookie
+    """
+    url = "http://localhost:8080/"
+    data = {"user": username, "password": password}
+    with requests.Session() as session:
+        response = session.post(url, data=data)
+        return session.cookies.get("auth_token")
+  
+  
+def login_home(cookie: str) -> str:
+    """
+    Logs in a user with the server using a cookie
+    """
+    url = "http://localhost:8080/home"
+    with requests.Session() as session:
+        response = session.get(url, cookies={"auth_token": cookie})
+        return response.text
 
 
-def create_cookie():
-    block_size = AES.block_size
-    # Create a user with a username such that the 'user=USERNAME&uid=UID&role=' part of the cookie is exactly 2 blocks long
-    # 15
-    username1 = "A" * (block_size - len("user=&uid=1&role="))
-    cookie1 = bytes.fromhex("170f3e9656771270a4a71dc63e7323b07c5f1e6503fbd2a73e15461305f857c23b7de57cb6327ef2e1b7082bc0960629")
-    # Create another user with a username such that the 'user=USERNAME&uid=UID&role=user' part of the cookie is exactly 2 blocks long
-    # 11
-    # username2 = "B" * (block_size - len("user=&uid=1&role=user"))
-    # cookie2 = bytes.fromhex("26b27be2792db071651135cab6d73352ad8f39c7693d44cce9b7d210b9428b6abe6fd070b457bbcdce744af968947c60")
-    # Replace the 'user' block in our first cookie with the 'admin' block from our second cookie
-    # admin_cookie = cookie1[:2*BLOCK_SIZE] + cookie2[2*BLOCK_SIZE:4*BLOCK_SIZE] + cookie1[3*BLOCK_SIZE:]
-    admin_cookie = cookie1[:2*block_size] + "admin".encode()
-    print("Admin cookie:", b64encode(admin_cookie).decode())
+def create_ebc_cookie() -> str:
+    """
+    Creates a cookie using ECB mode of operation for a block cipher
+    Cookies in the server follow the format user=USERNAME&uid=UID&role=ROLE
+    where:
+    * USERNAME is the registered username of the user
+    * UID is arbitrary but unique across users
+    * ROLE is always "user" for self-regular users, but can be "admin" for administrators
+    Goal: create a valid cookie that gives administrator access
+    """
+    # each block is 16 bytes long (AES block size)
+    # user=00000000000 admin0000000000B &uid=1&role=user
+    username_block_1 = "0" * 11 # this will fill up the first block of the cookie, prepended with "user="
+    username_block_2 = "admin" + chr(0) * 10 + chr(11) # this will fill up the second block of the cookie
+    username_1 = username_block_1 + username_block_2 # 32 bytes long
+    password = "password" # arbitrary password
+    # user=00000000000 0000&uid=1&role=
+    username_2 = "0" * 15 # this will fill up the entire first block of the cookie
+    
+    # create a cookie with the username and password
+    register_user(username_1, password)
+    register_user(username_2, password)
+
+    encoded_cookie_1 = login_user(username_1, password)
+    cookie_1: bytes = hex_to_bytes(encoded_cookie_1)
+    
+    encoded_cookie_2 = login_user(username_2, password)
+    cookie_2: bytes = hex_to_bytes(encoded_cookie_2)
+        
+    # extract blocks from both generated cookies to form the admin cookie
+    # user=00000000000 0000&uid=1&role= admin0000000000B
+    result = cookie_2[:32] + cookie_1[16:32]
+    admin_cookie = bytes_to_hex(result)
+    print("Admin cookie: ", admin_cookie)
+    return admin_cookie
 
 
 def main():
@@ -73,19 +136,8 @@ def main():
         img = Image.open(BytesIO(ciphertext))
         img.show()
 
-    create_cookie()
-
-# brute force open all ciphertext images
-# def main():
-#     with open("Lab2.TaskII.B.txt", "r") as f:
-#         ciphertexts = [bytes.fromhex(line.strip()) for line in f]
-#     for i, ciphertext in enumerate(ciphertexts):
-#         # Write the raw bytes to a file
-#         with open(f"image_{i}.bmp", "wb") as f:
-#             f.write(ciphertext)
-#         # Open the image file with an image viewer
-#         img = Image.open(BytesIO(ciphertext))
-#         img.show()
+    admin_cookie = create_ebc_cookie()
+    print(login_home(admin_cookie))
 
 
 if __name__ == "__main__":

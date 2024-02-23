@@ -74,7 +74,7 @@ def main():
 
     # Flip the bits in the cookie
     flipped_cookie = flip_bits(cookie)
-
+    print(flipped_cookie)
     print(login_home(flipped_cookie))
 
 if __name__ == "__main__":
